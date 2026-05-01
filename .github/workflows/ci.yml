@@ -32,13 +32,13 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install project + dev deps
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --all-extras --frozen
 
       - name: Ruff lint
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Ruff format check
-        run: ruff format --check .
+        run: uv run ruff format --check .
 
       - name: Pytest
-        run: pytest
+        run: uv run pytest
