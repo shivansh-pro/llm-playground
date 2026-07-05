@@ -31,8 +31,12 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
+      # Install ONLY the dev extra. Heavy libs (chromadb, llama-index,
+      # langgraph, deepeval, mcp) are lazy-imported in the source and mocked
+      # in unit tests, so CI does not need them. Keeps CI fast (~30s vs several
+      # minutes) and hermetic (no network model downloads, no DB, no API keys).
       - name: Install project + dev deps
-        run: uv sync --all-extras --frozen
+        run: uv sync --extra dev --frozen
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -40,5 +44,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
-      - name: Pytest
-        run: uv run pytest
+      # Run unit tests only. Integration tests (real libs/services) are marked
+      # and excluded here; they run locally after `uv sync --all-extras`.
+      - name: Pytest (unit)
+        run: uv run pytest -m "not integration"
