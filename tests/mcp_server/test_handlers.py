@@ -19,11 +19,8 @@ from llm_playground.rag.query import Answer
 
 def _deps() -> MCPDeps:
     return MCPDeps(
-        search_papers=lambda q, k: (
-            [SearchResult(text=f"paper:{q}", source="p.pdf", score=0.9)][:k]
-            or [SearchResult(text=f"paper:{q}", source="p.pdf", score=0.9)]
-        ),
-        search_code=lambda q, k: [SearchResult(text=f"code:{q}", source="m.py", score=0.8)],
+        search_papers=lambda q, k: [SearchResult(text=f"paper:{q}", source="p.pdf", score=0.9)][:k],
+        search_code=lambda q, k: [SearchResult(text=f"code:{q}", source="m.py", score=0.8)][:k],
         ask=lambda question, route: Answer(
             question=question, route=route, answer="grounded", sources=["p.pdf"]
         ),

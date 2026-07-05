@@ -13,6 +13,7 @@ from llm_playground.rag.stores import (
     InMemoryStore,
     VectorStore,
     cosine_similarity,
+    validate_identifier,
 )
 
 
@@ -72,6 +73,46 @@ def test_inmemory_satisfies_protocol() -> None:
     # Structural typing: InMemoryStore has add+query, so it IS a VectorStore.
     store: VectorStore = InMemoryStore()
     assert hasattr(store, "add") and hasattr(store, "query")
+
+
+# --- validate_identifier (SQL identity-injection guard) ----------------------
+@pytest.mark.parametrize("name", ["chunks", "paper_chunks", "_tmp", "T123", "a_b_c"])
+def test_validate_identifier_accepts_safe_names(name: str) -> None:
+    assert validate_identifier(name) == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "chunks; DROP TABLE users; --",  # classic injection
+        "has space",
+        "1leading_digit",
+        'quo"te',
+        "semi;colon",
+        "",
+    ],
+)
+def test_validate_identifier_rejects_unsafe_names(name: str) -> None:
+    with pytest.raises(ValueError, match="unsafe SQL identifier"):
+        validate_identifier(name)
+
+
+def test_pgvectorstore_rejects_bad_table_before_connecting(monkeypatch) -> None:
+    """A malicious table name must be rejected in __init__ BEFORE any DB
+    connection is attempted — fail fast, and prove no psycopg2 call happens."""
+    import sys
+    import types
+
+    connected = {"hit": False}
+    fake = types.ModuleType("psycopg2")
+    fake.connect = lambda *a, **k: connected.__setitem__("hit", True)
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+
+    from llm_playground.rag.stores import PgVectorStore
+
+    with pytest.raises(ValueError, match="unsafe SQL identifier"):
+        PgVectorStore(dsn="x", dim=8, table="chunks; DROP TABLE users; --")
+    assert connected["hit"] is False
 
 
 # --- ChromaStore (mocked unit) -----------------------------------------------

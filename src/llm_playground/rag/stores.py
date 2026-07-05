@@ -37,6 +37,7 @@ a one-line change at the composition root.
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from llm_playground.rag.models import Chunk, SearchResult
@@ -160,6 +161,28 @@ class ChromaStore:
         ]
 
 
+# A SQL identifier we're willing to interpolate into DDL/DML. Postgres table
+# names can't be parameterized with %s (that's for VALUES only), so we MUST
+# build them into the query string — which means we must validate them
+# ourselves. This regex is the allowlist: letter/underscore start, then
+# word chars. Anything else (spaces, quotes, semicolons) is rejected, closing
+# the identity-injection hole (e.g. table='x; DROP TABLE users; --').
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_identifier(name: str) -> str:
+    """Return `name` if it is a safe SQL identifier, else raise ValueError.
+
+    Pure + unit-tested. Used to guard the interpolated table name in
+    PgVectorStore. For untrusted identifiers in real systems, prefer
+    psycopg2.sql.Identifier, which quotes properly; an allowlist is the
+    belt-and-suspenders version and makes intent explicit.
+    """
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return name
+
+
 class PgVectorStore:
     """VectorStore backed by Postgres + the pgvector extension.
 
@@ -178,16 +201,43 @@ class PgVectorStore:
     Query uses the `<=>` cosine-distance operator; similarity = 1 - distance.
     The HNSW index is what makes this scale past a brute-force scan.
 
+    Lifecycle: holds one psycopg2 connection. Use as a context manager
+    (`with PgVectorStore(...) as store:`) or call `.close()` explicitly so the
+    connection is released — a long-lived service that leaks connections will
+    exhaust the Postgres pool.
+
     Lazy import (psycopg2); requires a running Postgres. Integration-tested.
     """
 
     def __init__(self, dsn: str, dim: int, table: str = "chunks") -> None:
         import psycopg2
 
-        self._table = table
+        # Validate BEFORE connecting so a bad identifier fails fast and cheap
+        # (and so the validation is unit-testable without a live DB via the
+        # standalone validate_identifier function).
+        self._table = validate_identifier(table)
         self._dim = dim
         self._conn = psycopg2.connect(dsn)
-        self._ensure_schema()
+        try:
+            self._ensure_schema()
+        except Exception:
+            # Don't leak the connection if schema creation fails during init.
+            self._conn.close()
+            raise
+
+    # Context-manager protocol: `with PgVectorStore(...) as s: ...` closes the
+    # connection on exit even if the body raises. This is the idiomatic Python
+    # way to tie a resource's lifetime to a scope (like Java try-with-resources).
+    def __enter__(self) -> PgVectorStore:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release the DB connection. Safe to call more than once."""
+        if getattr(self, "_conn", None) is not None and not self._conn.closed:
+            self._conn.close()
 
     def _ensure_schema(self) -> None:
         with self._conn.cursor() as cur:
@@ -206,14 +256,28 @@ class PgVectorStore:
     def add(self, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
         import json
 
-        with self._conn.cursor() as cur:
-            for chunk, emb in zip(chunks, embeddings, strict=True):
-                cur.execute(
-                    f"INSERT INTO {self._table} (source, chunk_index, content, metadata, embedding) "
-                    "VALUES (%s, %s, %s, %s, %s);",
-                    (chunk.source, chunk.chunk_index, chunk.text, json.dumps(chunk.metadata), emb),
-                )
-        self._conn.commit()
+        # Rollback on failure so a bad batch doesn't leave the connection in an
+        # aborted-transaction state (InFailedSqlTransaction) that poisons every
+        # subsequent query on this instance.
+        try:
+            with self._conn.cursor() as cur:
+                for chunk, emb in zip(chunks, embeddings, strict=True):
+                    cur.execute(
+                        f"INSERT INTO {self._table} "
+                        "(source, chunk_index, content, metadata, embedding) "
+                        "VALUES (%s, %s, %s, %s, %s);",
+                        (
+                            chunk.source,
+                            chunk.chunk_index,
+                            chunk.text,
+                            json.dumps(chunk.metadata),
+                            emb,
+                        ),
+                    )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def query(self, embedding: list[float], top_k: int = 5) -> list[SearchResult]:
         with self._conn.cursor() as cur:

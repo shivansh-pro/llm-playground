@@ -41,7 +41,9 @@ class DeterministicEmbedder:
     Maps each text to a fixed-length vector derived from its SHA-256 hash.
     Properties that make it test-friendly:
         - Deterministic: embed(["x"]) is always identical.
-        - Collision-resistant: distinct texts get distinct vectors.
+        - Collision-resistant in practice: distinct texts almost always get
+          distinct vectors (SHA-256 makes collisions statistically negligible;
+          it is not a hard guarantee after float truncation + L2 normalization).
         - Normalized to unit length so cosine similarity is well-behaved.
     """
 
